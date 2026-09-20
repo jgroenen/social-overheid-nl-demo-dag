@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>social.overheid.nl demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --blauw: #164273;
+    --blauw-donker: #0b2545;
+    --lint: #164273;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 40%, var(--blauw) 0%, var(--blauw-donker) 100%);
+    font-family: "Rijksoverheid Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  body.stil, body.stil * { cursor: none !important; }
+  .logo {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; color: #fff; opacity: .16; user-select: none;
+    font-weight: 800; letter-spacing: -.03em; line-height: .9;
+    font-size: 15.5vw; white-space: nowrap;
+  }
+  .logo span { display: block; }
+  .logo .sub { font-size: 4.2vw; font-weight: 500; letter-spacing: 0; margin-top: 2vw; opacity: .8; }
+
+  .kaart {
+    position: fixed; top: 0; left: 0; width: min(30vw, 460px); min-width: 300px;
+    background: #fff; color: #111; border-radius: 18px; padding: 20px 22px;
+    box-shadow: 0 14px 40px rgba(0,0,0,.35); will-change: transform;
+    border-top: 6px solid var(--lint);
+  }
+  .kop { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .kop img { width: 48px; height: 48px; border-radius: 10px; object-fit: cover; background: #ddd; flex: none; }
+  .kop .naam { font-weight: 700; font-size: 18px; line-height: 1.2; }
+  .kop .acc { font-size: 14px; color: #555; }
+  .tekst { font-size: 20px; line-height: 1.35; overflow-wrap: anywhere; }
+  .kaart img.media {
+    display: block; width: 100%; max-height: 220px; object-fit: cover;
+    border-radius: 10px; margin-top: 12px;
+  }
+  .status {
+    position: fixed; left: 12px; bottom: 8px; color: #fff; opacity: .35; font-size: 12px;
+  }
+  #fs {
+    position: fixed; right: 12px; bottom: 12px; z-index: 1000; cursor: pointer;
+    background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.3);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; opacity: .45;
+    transition: opacity .2s;
+  }
+  #fs:hover, #fs:focus-visible { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="logo"><div><span>social.</span><span>overheid.nl</span></div></div>
+  <div class="status" id="status"></div>
+  <button id="fs" type="button">Fullscreen</button>
+
+<script>
+const API = "https://social.overheid.nl/api/v1/timelines/public?local=true&limit=40";
+const AANTAL = 50;             // laatste N berichten
+const MAX_TEKST = 280;         // tekens per kaart
+const SPAWN_MS = 2200;         // interval tussen nieuwe kaarten
+const VAL_MIN = 14000, VAL_MAX = 22000; // valtijd in ms
+const VERVERS_MS = 5 * 60 * 1000;
+
+let posts = [];
+let stapel = [];
+let vorigeX = [];
+
+function naarTekst(html) {
+  const d = document.createElement("div");
+  d.innerHTML = html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>\s*<p>/gi, "\n\n");
+  let t = (d.textContent || "").replace(/\s+\n/g, "\n").trim();
+  if (t.length > MAX_TEKST) t = t.slice(0, MAX_TEKST).replace(/\s+\S*$/, "") + "…";
+  return t;
+}
+
+async function laad() {
+  try {
+    const eerste = await fetch(API).then(r => r.json());
+    let alles = eerste;
+    if (eerste.length) {
+      const laatste = eerste[eerste.length - 1].id;
+      const tweede = await fetch(API + "&max_id=" + laatste).then(r => r.json());
+      alles = eerste.concat(tweede);
+    }
+    posts = alles.slice(0, AANTAL).map(s => {
+      const b = s.reblog || s;
+      return {
+        naam: b.account.display_name || b.account.username,
+        acc: "@" + b.account.acct,
+        avatar: b.account.avatar,
+        tekst: naarTekst(b.content) || (b.spoiler_text || ""),
+        media: (b.media_attachments.find(m => m.type === "image") || {}).preview_url || null,
+      };
+    }).filter(p => p.tekst);
+    try { localStorage.setItem("posts", JSON.stringify(posts)); } catch {}
+    document.getElementById("status").textContent = "";
+  } catch (e) {
+    document.getElementById("status").textContent = "offline – toont opgeslagen berichten";
+    if (!posts.length) {
+      try { posts = JSON.parse(localStorage.getItem("posts") || "[]"); } catch {}
+    }
+  }
+}
+
+function volgende() {
+  if (!stapel.length) {
+    stapel = posts.slice();
+    for (let i = stapel.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [stapel[i], stapel[j]] = [stapel[j], stapel[i]];
+    }
+  }
+  return stapel.pop();
+}
+
+// Geeft de translate-x voor een kaart. De kaart mag links en rechts buiten beeld,
+// zolang er een stukje (MIN_ZICHTBAAR van de breedte) in beeld blijft.
+const MIN_ZICHTBAAR = 0.12;
+function kies_x(breedte, schaal) {
+  const zichtbaar = breedte * schaal;                 // breedte na schalen
+  const marge = (breedte - zichtbaar) / 2;            // schalen gebeurt om het midden
+  const min = -zichtbaar * (1 - MIN_ZICHTBAAR);       // visuele linkerrand
+  const max = innerWidth - zichtbaar * MIN_ZICHTBAAR;
+  let beste = 0, besteAfstand = -1;
+  for (let i = 0; i < 8; i++) {
+    const l = min + Math.random() * (max - min);
+    const afstand = Math.min(...vorigeX.map(v => Math.abs(v - l)), 1e9);
+    if (afstand > besteAfstand) { besteAfstand = afstand; beste = l; }
+  }
+  vorigeX.push(beste);
+  if (vorigeX.length > 3) vorigeX.shift();
+  return beste - marge;
+}
+
+function maakKaart(p) {
+  const k = document.createElement("div");
+  k.className = "kaart";
+  const kop = document.createElement("div"); kop.className = "kop";
+  const av = document.createElement("img"); av.src = p.avatar; av.alt = "";
+  const wie = document.createElement("div");
+  const n = document.createElement("div"); n.className = "naam"; n.textContent = p.naam;
+  const a = document.createElement("div"); a.className = "acc"; a.textContent = p.acc;
+  wie.append(n, a); kop.append(av, wie);
+  const t = document.createElement("div"); t.className = "tekst"; t.textContent = p.tekst;
+  k.append(kop, t);
+  if (p.media) {
+    const m = document.createElement("img"); m.className = "media"; m.src = p.media; m.alt = "";
+    k.append(m);
+  }
+  return k;
+}
+
+function laatVallen() {
+  if (!posts.length) return;
+  const k = maakKaart(volgende());
+  document.body.append(k);
+  // diepte: 0 = ver weg (klein, wazig, donkerder, langzaam), 1 = vooraan (groot, scherp, snel)
+  const diepte = Math.random();
+  const schaal = 0.55 + diepte * 0.7;
+  const x = kies_x(k.offsetWidth, schaal);
+  k.style.zIndex = Math.round(diepte * 100);
+  k.style.filter = `blur(${((1 - diepte) ** 2 * 2.5).toFixed(1)}px) brightness(${(0.65 + diepte * 0.35).toFixed(2)})`;
+  const duur = (VAL_MIN + Math.random() * (VAL_MAX - VAL_MIN)) * (1.5 - diepte * 0.7);
+  const draai = (Math.random() - .5) * 8;
+  // -100% = de eigen hoogte van de kaart, ook als die later groeit (afbeelding laadt)
+  // vallen via de losse `translate`/`rotate`/`scale`-properties, zodat `transform` vrij blijft voor het 3D-schommelen
+  const anim = k.animate([
+    { translate: `${x}px calc(-100% - 120px)`, rotate: `${-draai}deg`, scale: schaal },
+    { translate: `${x}px calc(100vh + 120px)`, rotate: `${draai}deg`, scale: schaal },
+  ], { duration: duur, easing: "linear", fill: "forwards" });
+
+  // schommelen om de y-as: linker- en rechterzijkant komen afwisselend naar voren
+  const hoek = 10 + Math.random() * 8;
+  const periode = 3500 + Math.random() * 2500;
+  k.animate([
+    { transform: `perspective(900px) rotateY(${-hoek}deg)` },
+    { transform: `perspective(900px) rotateY(${hoek}deg)` },
+  ], { duration: periode, easing: "ease-in-out", direction: "alternate",
+        iterations: Infinity, delay: -Math.random() * periode });
+  anim.onfinish = () => k.remove();
+}
+
+// cursor verbergen na 3 s stilte, terug bij beweging
+let stilTimer;
+function toonCursor() {
+  document.body.classList.remove("stil");
+  clearTimeout(stilTimer);
+  stilTimer = setTimeout(() => document.body.classList.add("stil"), 3000);
+}
+document.addEventListener("mousemove", toonCursor);
+toonCursor();
+
+const fsKnop = document.getElementById("fs");
+fsKnop.addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
+document.addEventListener("fullscreenchange", () => {
+  fsKnop.textContent = document.fullscreenElement ? "Verlaat fullscreen" : "Fullscreen";
+});
+
+(async () => {
+  await laad();
+  laatVallen();
+  setInterval(laatVallen, SPAWN_MS);
+  setInterval(laad, VERVERS_MS);
+})();
+</script>
+</body>
+</html>
